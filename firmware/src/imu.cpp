@@ -15,19 +15,29 @@ static bool     imu_ok = false;
 
 // Determine target rotation from accelerometer gravity vector.
 // Returns 0-3 or 255 if ambiguous (e.g. face-up/face-down).
+//
+// On rectangular panels (1.8 board) only 0° and 180° are returned —
+// the layout doesn't fit a 90°/270° landscape orientation.
 static uint8_t accel_to_rotation(float ax, float ay) {
     float abs_ax = fabsf(ax);
     float abs_ay = fabsf(ay);
 
+#if BOARD_ROTATE_4WAY
     if (abs_ax < TILT_THRESHOLD && abs_ay < TILT_THRESHOLD) {
         return 255;  // ambiguous, keep current
     }
-
     if (abs_ay > abs_ax) {
         return (ay > 0) ? 3 : 1;
     } else {
         return (ax > 0) ? 0 : 2;
     }
+#else
+    // Portrait-only board: detect just 0° (right-side-up) vs 180° (inverted).
+    // Y-dominant orientations (sideways) are ignored — we stay at current.
+    if (abs_ax < TILT_THRESHOLD) return 255;
+    if (abs_ay > abs_ax)         return 255;
+    return (ax > 0) ? 0 : 2;
+#endif
 }
 
 void imu_init(void) {

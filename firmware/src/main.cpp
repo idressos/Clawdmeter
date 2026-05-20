@@ -1,7 +1,9 @@
 #include <Arduino.h>
 #include <lvgl.h>
 #include <ArduinoJson.h>
+#include <Wire.h>
 #include "display_cfg.h"
+#include "expander.h"
 #include "data.h"
 #include "ui.h"
 #include "ble.h"
@@ -10,24 +12,42 @@
 #include "splash.h"
 #include "usage_rate.h"
 
-// Physical buttons (global, screen-independent):
-//   BTN_BACK   (GPIO 0)  — left,  send Space (Claude Code voice mode push-to-talk)
-//   BTN_FWD    (GPIO 18) — right, send Shift+Tab (Claude Code mode toggle)
-//   AXP PWR    (PMU)     — middle, cycle screens; on splash, cycle animations
-#define BTN_BACK 0
-#define BTN_FWD  18
-
 // ---- Hardware objects ----
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
     LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
-Arduino_CO5300 *gfx = new Arduino_CO5300(
+
+#if BOARD_DISPLAY_CO5300
+// CO5300 ctor: (bus, rst, rotation, w, h, col_off1, row_off1, col_off2, row_off2)
+Arduino_OLED *gfx = new Arduino_CO5300(
     bus, LCD_RESET, 0 /* rotation */,
     LCD_WIDTH, LCD_HEIGHT, 0, 0, 0, 0);
+#elif BOARD_DISPLAY_SH8601
+// SH8601 reset is driven by the TCA9554 expander, not a GPIO.
+Arduino_OLED *gfx = new Arduino_SH8601(
+    bus, GFX_NOT_DEFINED, 0 /* rotation */,
+    LCD_WIDTH, LCD_HEIGHT);
+#endif
+
+#if BOARD_TOUCH_CST92XX
 TouchDrvCST92xx touch;
+#endif
+
 XPowersPMU pmu;
 SensorQMI8658 imu;
 
 static UsageData usage = {};
+
+// Physical buttons (global, screen-independent):
+//   BTN_BACK (GPIO 0)  — left,  send Space (Claude Code voice mode push-to-talk)
+//   BTN_FWD  (GPIO 18) — right, send Shift+Tab (Claude Code mode toggle) — 2.16 only
+//   AXP PWR  (PMU)     — middle, cycle screens; on splash, cycle animations
+//
+// On the 1.8 board there is no right-side GPIO 18 button, so Shift+Tab is
+// fired by a long touch-press on the Usage screen (see handle_touch_gesture).
+#define BTN_BACK BTN_BACK_PIN
+#if BOARD_HAS_BTN_RIGHT
+#define BTN_FWD  BTN_FWD_PIN
+#endif
 
 // ---- Touch interrupt + shared state ----
 static volatile bool     touch_pressed = false;
@@ -35,14 +55,45 @@ static volatile uint16_t touch_x = 0;
 static volatile uint16_t touch_y = 0;
 static volatile bool     touch_data_ready = false;
 
+// Held LVGL pointer indev so non-UI code can cancel pending clicks
+// (used by the 1.8 long-press gesture).
+static lv_indev_t *g_touch_indev = nullptr;
+
 static void IRAM_ATTR touch_isr(void) {
     touch_data_ready = true;
 }
 
-static void touch_read() {
-    if (!touch_data_ready) return;
-    touch_data_ready = false;
+#if BOARD_TOUCH_FT3168
+// Minimal FT3168 single-finger read. Datasheet register map:
+//   0x02       — number of active touches (low 4 bits)
+//   0x03..0x06 — point 0: Xh, Xl, Yh, Yl (Xh's top 2 bits are event flags)
+static bool ft3168_read(uint16_t *out_x, uint16_t *out_y) {
+    Wire.beginTransmission(TOUCH_ADDR);
+    Wire.write(0x02);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom((int)TOUCH_ADDR, 5) != 5) return false;
+    uint8_t buf[5];
+    for (int i = 0; i < 5; i++) buf[i] = Wire.read();
+    if ((buf[0] & 0x0F) == 0) return false;
+    uint16_t x = ((uint16_t)(buf[1] & 0x0F) << 8) | buf[2];
+    uint16_t y = ((uint16_t)(buf[3] & 0x0F) << 8) | buf[4];
+    if (x >= LCD_WIDTH)  x = LCD_WIDTH - 1;
+    if (y >= LCD_HEIGHT) y = LCD_HEIGHT - 1;
+    *out_x = x;
+    *out_y = y;
+    return true;
+}
+#endif
 
+// Read the touch controller. Poll when the IRQ has fired or a finger was
+// down on the previous tick — both CST9220 and FT3168 only IRQ on state
+// edges, so a drag wouldn't update x/y without this.
+static void touch_read() {
+    bool should_poll = touch_data_ready || touch_pressed;
+    touch_data_ready = false;
+    if (!should_poll) return;
+
+#if BOARD_TOUCH_CST92XX
     int16_t tx[5], ty[5];
     uint8_t n = touch.getPoint(tx, ty, touch.getSupportTouchPoint());
     if (n > 0) {
@@ -52,14 +103,23 @@ static void touch_read() {
     } else {
         touch_pressed = false;
     }
+#elif BOARD_TOUCH_FT3168
+    uint16_t x, y;
+    if (ft3168_read(&x, &y)) {
+        touch_pressed = true;
+        touch_x = x;
+        touch_y = y;
+    } else {
+        touch_pressed = false;
+    }
+#endif
 }
 
 // ---- LVGL draw buffers (PSRAM-backed, partial render) ----
 #define BUF_LINES 40
 static uint16_t *buf1 = nullptr;
 static uint16_t *buf2 = nullptr;
-// rot_buf for strip rotation — max size is 480×480 (full invalidation case)
-// but typical partial strips are much smaller
+// rot_buf for strip rotation — sized to fit the largest possible strip.
 static uint16_t *rot_buf = nullptr;
 
 // LVGL tick callback
@@ -67,46 +127,44 @@ static uint32_t my_tick(void) {
     return millis();
 }
 
-// Rotate a w×h strip and compute destination coordinates on the 480×480 display.
-// src pixels are in row-major order for the rectangle (sx, sy, w, h).
-// Output goes to rot_buf in row-major order for the destination rectangle.
+// Rotate a w×h strip and compute destination coordinates on the physical
+// panel. Square panels (2.16) support 4-way rotation; rectangular panels
+// (1.8) only flip 0°↔180° because 90°/270° would clip the layout.
 static void rotate_strip(const uint16_t *src, int32_t w, int32_t h,
                          int32_t sx, int32_t sy, uint8_t r,
                          int32_t *dx, int32_t *dy, int32_t *dw, int32_t *dh) {
-    const int S = LCD_WIDTH;  // 480
-
     switch (r) {
-    case 1: { // 90° CW: (x,y) -> (S-1-y, x)
+#if BOARD_ROTATE_4WAY
+    case 1: { // 90° CW: (x,y) -> (W-1-y, x). Only valid on square panels.
         *dw = h; *dh = w;
-        *dx = S - sy - h;
+        *dx = LCD_WIDTH - sy - h;
         *dy = sx;
         for (int32_t y = 0; y < h; y++) {
             for (int32_t x = 0; x < w; x++) {
-                // src(x,y) -> dst(h-1-y, x)
                 rot_buf[x * h + (h - 1 - y)] = src[y * w + x];
             }
         }
         break;
     }
-    case 2: { // 180°: (x,y) -> (S-1-x, S-1-y)
-        *dw = w; *dh = h;
-        *dx = S - sx - w;
-        *dy = S - sy - h;
+    case 3: { // 270° CW: (x,y) -> (y, H-1-x). Only valid on square panels.
+        *dw = h; *dh = w;
+        *dx = sy;
+        *dy = LCD_HEIGHT - sx - w;
         for (int32_t y = 0; y < h; y++) {
             for (int32_t x = 0; x < w; x++) {
-                rot_buf[(h - 1 - y) * w + (w - 1 - x)] = src[y * w + x];
+                rot_buf[(w - 1 - x) * h + y] = src[y * w + x];
             }
         }
         break;
     }
-    case 3: { // 270° CW: (x,y) -> (y, S-1-x)
-        *dw = h; *dh = w;
-        *dx = sy;
-        *dy = S - sx - w;
+#endif
+    case 2: { // 180°: (x,y) -> (W-1-x, H-1-y)
+        *dw = w; *dh = h;
+        *dx = LCD_WIDTH  - sx - w;
+        *dy = LCD_HEIGHT - sy - h;
         for (int32_t y = 0; y < h; y++) {
             for (int32_t x = 0; x < w; x++) {
-                // src(x,y) -> dst(y, w-1-x)
-                rot_buf[(w - 1 - x) * h + y] = src[y * w + x];
+                rot_buf[(h - 1 - y) * w + (w - 1 - x)] = src[y * w + x];
             }
         }
         break;
@@ -134,7 +192,7 @@ static void my_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_m
     lv_display_flush_ready(disp);
 }
 
-// CO5300 requires even-aligned flush regions
+// CO5300 requires even-aligned flush regions; harmless on SH8601.
 static void rounder_cb(lv_event_t* e) {
     lv_area_t *area = (lv_area_t*)lv_event_get_param(e);
     area->x1 = area->x1 & ~1;
@@ -228,8 +286,14 @@ void setup() {
     delay(300);
     Serial.println("{\"ready\":true}");
 
-    // Init I2C (shared by touch + PMU)
+    // Init I2C (shared by touch + PMU + IMU + expander on 1.8)
     Wire.begin(IIC_SDA, IIC_SCL);
+
+    // TCA9554 expander (1.8 only) — must release LCD_RESET / TP_RESET before
+    // the display driver runs SLPOUT, otherwise SH8601 stays in reset.
+    // No-op on 2.16.
+    expander_init();
+    expander_reset_panel();
 
     // Init display
     gfx->begin();
@@ -243,8 +307,9 @@ void setup() {
     imu_init();
 
     // Init touch
+#if BOARD_TOUCH_CST92XX
     touch.setPins(TP_RST, TP_INT);
-    if (!touch.begin(Wire, CST9220_ADDR, IIC_SDA, IIC_SCL)) {
+    if (!touch.begin(Wire, TOUCH_ADDR, IIC_SDA, IIC_SCL)) {
         Serial.println("Touch init failed");
     } else {
         touch.setMaxCoordinates(LCD_WIDTH, LCD_HEIGHT);
@@ -253,6 +318,19 @@ void setup() {
         attachInterrupt(TP_INT, touch_isr, FALLING);
         Serial.println("Touch init OK");
     }
+#elif BOARD_TOUCH_FT3168
+    // FT3168 reset was released by expander_reset_panel(). The INT line is
+    // a direct GPIO; pull-up keeps it high in idle and the FT3168 pulls it
+    // low on each touch event.
+    pinMode(TP_INT, INPUT_PULLUP);
+    Wire.beginTransmission(TOUCH_ADDR);
+    if (Wire.endTransmission() == 0) {
+        attachInterrupt(TP_INT, touch_isr, FALLING);
+        Serial.println("FT3168 init OK");
+    } else {
+        Serial.println("FT3168 not responding");
+    }
+#endif
 
     // Init LVGL
     lv_init();
@@ -261,9 +339,11 @@ void setup() {
     // Allocate PSRAM-backed partial render buffers
     buf1 = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
     buf2 = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
-    // rot_buf needs to hold the largest possible strip after rotation
-    // A 480×40 strip rotated 90° becomes 40×480, same pixel count
-    rot_buf = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
+    // rot_buf needs to hold the largest possible strip after rotation.
+    // For 4-way rotation, the 90/270 case can produce strips up to
+    // LCD_HEIGHT pixels wide → size by the larger dimension.
+    size_t rot_strip_pixels = (size_t)((LCD_WIDTH > LCD_HEIGHT) ? LCD_WIDTH : LCD_HEIGHT) * BUF_LINES;
+    rot_buf = (uint16_t*)heap_caps_malloc(rot_strip_pixels * 2, MALLOC_CAP_SPIRAM);
 
     lv_display_t* disp = lv_display_create(LCD_WIDTH, LCD_HEIGHT);
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
@@ -271,19 +351,21 @@ void setup() {
     lv_display_set_buffers(disp, buf1, buf2, LCD_WIDTH * BUF_LINES * 2,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
 
-    // CO5300 even-alignment rounder
+    // Even-alignment rounder (mandatory on CO5300, harmless on SH8601)
     lv_display_add_event_cb(disp, rounder_cb, LV_EVENT_INVALIDATE_AREA, NULL);
 
-    lv_indev_t* indev = lv_indev_create();
-    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
-    lv_indev_set_read_cb(indev, my_touch_cb);
+    g_touch_indev = lv_indev_create();
+    lv_indev_set_type(g_touch_indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(g_touch_indev, my_touch_cb);
 
     // Init BLE data channel
     ble_init();
 
-    // Physical buttons: back (GPIO 0) and forward (GPIO 18)
+    // Physical buttons
     pinMode(BTN_BACK, INPUT_PULLUP);
+#if BOARD_HAS_BTN_RIGHT
     pinMode(BTN_FWD,  INPUT_PULLUP);
+#endif
 
     // Build dashboard
     ui_init();
@@ -330,6 +412,40 @@ static void handle_rotation_change(void) {
     else                ramp_step++;
 }
 
+#if !BOARD_HAS_BTN_RIGHT
+// Long-press touch on the Usage screen → Shift+Tab (Claude Code mode toggle).
+// Required on the 1.8 board because it lacks the right-side GPIO 18 button.
+// Calls lv_indev_wait_release so the eventual finger-lift doesn't also fire
+// global_click_cb (which would toggle the splash).
+#define LONG_PRESS_MS  500
+#define KEY_HOLD_MS    50    // duration the HID key is held before release
+static void handle_touch_gesture(void) {
+    static bool prev_pressed = false;
+    static uint32_t press_start_ms = 0;
+    static bool long_press_fired = false;
+    static uint32_t keyup_due_at_ms = 0;
+
+    bool now_pressed = touch_pressed;
+    if (now_pressed && !prev_pressed) {
+        press_start_ms = millis();
+        long_press_fired = false;
+    }
+    if (now_pressed && !long_press_fired &&
+        ui_get_current_screen() == SCREEN_USAGE &&
+        millis() - press_start_ms >= LONG_PRESS_MS) {
+        ble_keyboard_press(0x2B, 0x02);   // HID Tab + LEFT_SHIFT
+        long_press_fired = true;
+        keyup_due_at_ms = millis() + KEY_HOLD_MS;
+        if (g_touch_indev) lv_indev_wait_release(g_touch_indev);
+    }
+    if (keyup_due_at_ms && millis() >= keyup_due_at_ms) {
+        ble_keyboard_release();
+        keyup_due_at_ms = 0;
+    }
+    prev_pressed = now_pressed;
+}
+#endif
+
 void loop() {
     touch_read();
     lv_timer_handler();
@@ -339,31 +455,38 @@ void loop() {
     imu_tick();
     splash_tick();
 
-    // Three-button input (global, screen-independent):
+    // Side-button input (board-conditional):
     //   LEFT  (GPIO 0)  → Space (voice-mode push-to-talk; press & release tracked)
-    //   RIGHT (GPIO 18) → Shift+Tab (Claude Code mode toggle)
+    //   RIGHT (GPIO 18) → Shift+Tab (Claude Code mode toggle)  — 2.16 only
     //   PWR   (AXP)     → cycle screens; on splash, cycle animations
     {
-        static bool back_was = false, fwd_was = false;
+        static bool back_was = false;
         bool back_now = (digitalRead(BTN_BACK) == LOW);
-        bool fwd_now  = (digitalRead(BTN_FWD)  == LOW);
-
         if (back_now != back_was) {
             if (back_now) ble_keyboard_press(0x2C, 0);  // HID Space, no mods
             else          ble_keyboard_release();
             back_was = back_now;
         }
+
+#if BOARD_HAS_BTN_RIGHT
+        static bool fwd_was = false;
+        bool fwd_now = (digitalRead(BTN_FWD) == LOW);
         if (fwd_now != fwd_was) {
             if (fwd_now) ble_keyboard_press(0x2B, 0x02);  // HID Tab + LEFT_SHIFT
             else         ble_keyboard_release();
             fwd_was = fwd_now;
         }
+#endif
 
         if (power_pwr_pressed()) {
             if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
             else                                          ui_cycle_screen();
         }
     }
+
+#if !BOARD_HAS_BTN_RIGHT
+    handle_touch_gesture();
+#endif
 
     handle_rotation_change();
 
