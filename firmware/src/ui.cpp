@@ -25,13 +25,17 @@ LV_FONT_DECLARE(font_mono_32);
 #define COL_RED       THEME_RED
 #define COL_BAR_BG    THEME_BAR_BG
 
-// ---- Layout constants for 480x480 (scaled for 2.16" high-DPI + rounded corners) ----
-#define SCR_W         480
-#define SCR_H         480
-#define MARGIN        20    // wider margin for rounded display corners
+// ---- Layout constants (driven by panel resolution) ----
+// 2.16 panel: 480×480 square @ ~314 PPI.
+// 1.8  panel: 368×448 portrait @ ~322 PPI.
+// Both panels are similarly dense, so the font sizes carry over and only the
+// canvas extents change. MARGIN is wide enough to clear rounded display corners.
+#define SCR_W         LCD_WIDTH
+#define SCR_H         LCD_HEIGHT
+#define MARGIN        20
 #define TITLE_Y       30
 #define CONTENT_Y     100
-#define CONTENT_W     (SCR_W - 2 * MARGIN)   // 440
+#define CONTENT_W     (SCR_W - 2 * MARGIN)
 
 // ---- Usage screen widgets ----
 static lv_obj_t* usage_container;
@@ -218,10 +222,20 @@ static void init_battery_icons(void) {
     init_icon_dsc_rgb565a8(&battery_dscs[4], ICON_BATTERY_CHARGING_W, ICON_BATTERY_CHARGING_H, icon_battery_charging_data);
 }
 
-// ======== Usage Screen (480x480) ========
-
-#define PANEL_H     150
-#define PANEL_GAP   16
+// ======== Usage Screen ========
+// Panel + gap constants are board-conditional so the layout fits the 1.8
+// panel's 448px height without overlapping the bottom anim label.
+#if defined(BOARD_AMOLED_18)
+#define PANEL_H      135
+#define PANEL_GAP    14
+#define BLE_INFO_H   150
+#define BLE_RESET_H   95
+#else
+#define PANEL_H      150
+#define PANEL_GAP    16
+#define BLE_INFO_H   160
+#define BLE_RESET_H  110
+#endif
 
 // One Session/Weekly panel: big % label, pill on the right, bar, reset label.
 // Pill y=1: symmetric inside the panel — panel-outer-top → pill-top equals
@@ -297,8 +311,8 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_color(lbl_ble_title, COL_TEXT, 0);
     lv_obj_align(lbl_ble_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
 
-    // Info panel (taller for 480x480)
-    lv_obj_t* p_info = make_panel(ble_container, MARGIN, CONTENT_Y, CONTENT_W, 160);
+    // Info panel
+    lv_obj_t* p_info = make_panel(ble_container, MARGIN, CONTENT_Y, CONTENT_W, BLE_INFO_H);
 
     // Bluetooth icon + status row
     static lv_image_dsc_t icon_bt_dsc;
@@ -327,10 +341,10 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_obj_set_pos(lbl_ble_mac, 0, 100);
 
     // Reset Bluetooth tap zone with trash icon
-    int reset_y = CONTENT_Y + 160 + 16;
+    int reset_y = CONTENT_Y + BLE_INFO_H + 16;
     lv_obj_t* reset_zone = lv_obj_create(ble_container);
     lv_obj_set_pos(reset_zone, MARGIN, reset_y);
-    lv_obj_set_size(reset_zone, CONTENT_W, 110);
+    lv_obj_set_size(reset_zone, CONTENT_W, BLE_RESET_H);
     lv_obj_set_style_bg_color(reset_zone, COL_PANEL, 0);
     lv_obj_set_style_bg_opa(reset_zone, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(reset_zone, 8, 0);
