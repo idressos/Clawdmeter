@@ -1,16 +1,32 @@
 # Project context
 
-ESP32-S3 firmware for a desk-side Claude Code usage monitor on a **Waveshare ESP32-S3-Touch-AMOLED-2.16** board (480×480 square AMOLED). Connects to a host daemon over BLE; daemon polls Anthropic API for usage data.
+ESP32-S3 firmware for a desk-side Claude Code usage monitor. Two Waveshare boards supported, selected at build time:
+
+- **ESP32-S3-Touch-AMOLED-2.16** (`-DBOARD_AMOLED_216`) — 480×480 square AMOLED, CO5300 + CST9220
+- **ESP32-S3-Touch-AMOLED-1.8**  (`-DBOARD_AMOLED_18`)  — 368×448 portrait AMOLED, SH8601 + FT3168 + TCA9554 IO expander
+
+Connects to a host daemon over BLE; daemon polls Anthropic API for usage data.
 
 This file is for future Claude Code sessions to bootstrap quickly. Read this first.
 
 ## Hardware (critical pins)
 
-- Display: **CO5300** AMOLED via QSPI (CS=12, SCLK=38, SDIO0..3=4..7, RST=2)
-- Touch: **CST9220** via I2C (SDA=15, SCL=14, INT=11, addr=0x5A)
-- PMU: **AXP2101** on same I2C bus (addr=0x34) — battery, USB VBUS, PWR button IRQ
-- IMU: **QMI8658** on same I2C bus (addr=0x6B) — accelerometer for auto-rotation
-- Buttons: GPIO 0 (left → Space/voice-mode), GPIO 18 (right → Shift+Tab/mode-toggle), AXP PKEY (middle → cycle screens; on splash → cycle animations)
+### Shared
+- PMU: **AXP2101** via I2C (addr=0x34) — battery, USB VBUS, PWR button IRQ
+- IMU: **QMI8658** via I2C (addr=0x6B) — accelerometer for auto-rotation
+- I2C bus: SDA=15, SCL=14
+
+### 2.16" board only
+- Display: **CO5300** via QSPI (CS=12, SCLK=38, SDIO0..3=4..7, RST=2)
+- Touch: **CST9220** via I2C (INT=11, RST=2 shared with LCD, addr=0x5A)
+- Buttons: GPIO 0 (left → Space), GPIO 18 (right → Shift+Tab), AXP PKEY (cycle)
+
+### 1.8" board only
+- Display: **SH8601** via QSPI (CS=12, **SCLK=11**, SDIO0..3=4..7, RST via TCA9554 EXIO0)
+- Touch: **FT3168** via I2C (INT=21, RST via TCA9554 EXIO1, addr=0x38)
+- IO expander: **TCA9554** at addr 0x20 — drives LCD_RESET (EXIO0), TP_RESET (EXIO1), DSI_PWR_EN (EXIO2)
+- Buttons: GPIO 0 (BOOT → Space), AXP PKEY (cycle). No right-side button — Shift+Tab is fired by a 500ms long touch-press on the Usage screen instead.
+- Rotation is restricted to 0°/180° (rectangular panel can't fit 90°/270°).
 
 ## Architecture
 
@@ -32,10 +48,19 @@ splash_animations.h — generated, do not hand-edit
 
 ## Build / flash
 
+You must pick a board env. There is no implicit default in `platformio.ini`.
+
 ```bash
-pio run -d firmware                                       # build
-pio run -d firmware -t upload --upload-port /dev/ttyACM0  # flash (binary path uses USB JTAG)
+# 2.16" board
+pio run -d firmware -e waveshare_amoled_216
+pio run -d firmware -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0
+
+# 1.8" board
+pio run -d firmware -e waveshare_amoled_18
+pio run -d firmware -e waveshare_amoled_18  -t upload --upload-port /dev/ttyACM0
 ```
+
+`./flash.sh [PORT] [BOARD]` wraps the above (BOARD = `2.16` or `1.8`, default `2.16`).
 
 `/home/hermann/.platformio/penv/bin/pio` if `pio` isn't on PATH.
 
@@ -49,7 +74,8 @@ The boot screen is `SCREEN_SPLASH` and only advances on a physical button press,
 
 ## Critical gotchas
 
-1. **CO5300 cannot rotate.** Its MADCTL only supports axis flips, not column/row exchange. Rotation is done by **CPU pixel remapping in `my_flush_cb`** in main.cpp. We use **PARTIAL render mode with strip rotation** (small 480×40 strips, fast). On rotation change → AMOLED brightness flash → force redraw.
+0. **Board-conditional code.** Pick board with `-DBOARD_AMOLED_216` or `-DBOARD_AMOLED_18` in `platformio.ini`. `display_cfg.h` routes pins, types, and feature flags (`BOARD_DISPLAY_CO5300`, `BOARD_TOUCH_FT3168`, `BOARD_HAS_TCA9554`, `BOARD_ROTATE_4WAY`, `BOARD_HAS_BTN_RIGHT`). `gfx` is typed `Arduino_OLED*` (common base of CO5300/SH8601 — has both `setBrightness` and `draw16bitRGBBitmap`). On the 1.8 board, `expander_init()` + `expander_reset_panel()` must run **before** `gfx->begin()`, otherwise the SH8601 stays in reset.
+1. **CO5300 cannot rotate.** Its MADCTL only supports axis flips, not column/row exchange. Rotation is done by **CPU pixel remapping in `my_flush_cb`** in main.cpp. We use **PARTIAL render mode with strip rotation** (small W×40 strips, fast). On rotation change → AMOLED brightness flash → force redraw.
 2. **OPI PSRAM** required: `board_build.arduino.memory_type = qio_opi` in platformio.ini. Without this, `MALLOC_CAP_SPIRAM` returns NULL and the screen is black.
 3. **pioarduino platform required.** GFX Library for Arduino needs Arduino Core 3.x (`esp32-hal-periman.h`), not the 2.x that standard `espressif32` ships. We pin `pioarduino/platform-espressif32` 55.03.38-1.
 4. **LVGL 9 font patching.** `lv_font_conv` outputs LVGL 8 format. Must remove `#if LVGL_VERSION_MAJOR >= 8` guards, drop `.cache` field, add `.release_glyph`, `.kerning`, `.static_bitmap`, `.fallback`, `.user_data`. Without patching, fonts render invisible.
