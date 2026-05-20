@@ -1,10 +1,12 @@
 # Clawdmeter
 
+> **Fork note:** this fork adds support for the **Waveshare ESP32-S3-Touch-AMOLED-1.8** (368×448, SH8601 + FT3168 + TCA9554) alongside the original 2.16" board. Pick the board at build time with `pio run -e waveshare_amoled_216` or `-e waveshare_amoled_18`.
+
 A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
 
-It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) and pairs with my laptop over Bluetooth, the splash screen plays pixel-art Clawd animations that get
+It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) (480×480) or [Waveshare ESP32-S3-Touch-AMOLED-1.8](https://www.waveshare.com/esp32-s3-touch-amoled-1.8.htm) (368×448) and pairs with my laptop over Bluetooth, the splash screen plays pixel-art Clawd animations that get
 busier when your usage rate climbs. The two side buttons send Space and
-Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
+Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts. (On the 1.8" board there is no right-side GPIO 18 button; Shift+Tab is sent by a 500 ms long touch-press on the Usage screen instead.)
 
 |              Usage meter              |              Clawd animation screen              |
 | :-----------------------------------: | :----------------------------------------------: |
@@ -25,7 +27,13 @@ While the splash is up, the middle button cycles animations instead of screens. 
 
 ## Hardware
 
-- [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) - ESP32-S3R8, 2.16" 480×480 AMOLED (CO5300 QSPI), CST9220 cap touch, AXP2101 PMU + Li-Po battery, QMI8658 IMU
+Either of:
+
+- [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) — ESP32-S3R8, 2.16" 480×480 AMOLED (CO5300 QSPI), CST9220 cap touch, AXP2101 PMU + Li-Po battery, QMI8658 IMU. Build env: `waveshare_amoled_216`.
+- [Waveshare ESP32-S3-Touch-AMOLED-1.8](https://www.waveshare.com/esp32-s3-touch-amoled-1.8.htm) — ESP32-S3R8, 1.8" 368×448 AMOLED (SH8601 QSPI), FT3168 cap touch, AXP2101 PMU + Li-Po battery, QMI8658 IMU, TCA9554 IO expander, PCF85063 RTC + ES8311 audio codec (the RTC and codec are present but unused by this firmware). Build env: `waveshare_amoled_18`.
+
+Plus:
+
 - USB-C cable for flashing firmware and charging
 - 3.7V Li-Po battery (MX1.25 2-pin connector, optional)
 
@@ -44,8 +52,9 @@ The macOS host pieces — Python daemon, LaunchAgent, and flash helper — were 
 ### Flash the firmware
 
 ```bash
-./flash-mac.sh                       # auto-detects /dev/cu.usbmodem*
-./flash-mac.sh /dev/cu.usbmodem1101  # or pass an explicit USB serial port
+./flash-mac.sh                              # 2.16" board, auto-detects /dev/cu.usbmodem*
+./flash-mac.sh /dev/cu.usbmodem1101         # explicit USB serial port, 2.16" board
+./flash-mac.sh /dev/cu.usbmodem1101 1.8     # 1.8" board (SH8601 / FT3168)
 ```
 
 ### Pair the device
@@ -76,8 +85,13 @@ launchctl load -w ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist # st
 ### Flash the firmware
 
 ```bash
+./flash.sh                            # 2.16" board on /dev/ttyACM0
+./flash.sh /dev/ttyACM0 1.8           # 1.8" board
+
+# or directly via pio
 cd firmware
-pio run -t upload --upload-port /dev/ttyACM0
+pio run -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0   # 2.16"
+pio run -e waveshare_amoled_18  -t upload --upload-port /dev/ttyACM0   # 1.8"
 ```
 
 ### Pair the device
