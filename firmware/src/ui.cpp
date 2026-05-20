@@ -5,13 +5,34 @@
 #include "icons.h"
 #include "display_cfg.h"
 
-// Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
+// Custom fonts (scaled for ~314 PPI panels).
 LV_FONT_DECLARE(font_tiempos_56);
+LV_FONT_DECLARE(font_tiempos_34);
 LV_FONT_DECLARE(font_styrene_48);
 LV_FONT_DECLARE(font_styrene_28);
 LV_FONT_DECLARE(font_styrene_24);
 LV_FONT_DECLARE(font_styrene_20);
+LV_FONT_DECLARE(font_styrene_16);
 LV_FONT_DECLARE(font_mono_32);
+LV_FONT_DECLARE(font_mono_18);
+
+// Board-conditional font picks. The 1.8 panel is 368 px wide vs 480 on the
+// 2.16, so the BT screen's longer strings (status pill, "Device: Claude
+// Controller", credits) clip in the larger sizes — drop them one or two
+// stops.
+#if defined(BOARD_AMOLED_18)
+#define UI_FONT_TITLE       &font_tiempos_34
+#define UI_FONT_BIG_STATUS  &font_styrene_28
+#define UI_FONT_INFO        &font_styrene_20
+#define UI_FONT_CREDIT      &font_styrene_20
+#define UI_FONT_CREDIT_SM   &font_styrene_16
+#else
+#define UI_FONT_TITLE       &font_tiempos_56
+#define UI_FONT_BIG_STATUS  &font_styrene_48
+#define UI_FONT_INFO        &font_styrene_28
+#define UI_FONT_CREDIT      &font_styrene_24
+#define UI_FONT_CREDIT_SM   &font_styrene_20
+#endif
 
 // Anthropic brand palette — design tokens live in theme.h
 #include "theme.h"
@@ -275,7 +296,7 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
-    lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_font(lbl_title, UI_FONT_TITLE, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
     lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
 
@@ -307,7 +328,7 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     // Title
     lv_obj_t* lbl_ble_title = lv_label_create(ble_container);
     lv_label_set_text(lbl_ble_title, "Bluetooth");
-    lv_obj_set_style_text_font(lbl_ble_title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_font(lbl_ble_title, UI_FONT_TITLE, 0);
     lv_obj_set_style_text_color(lbl_ble_title, COL_TEXT, 0);
     lv_obj_align(lbl_ble_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
 
@@ -324,19 +345,19 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
 
     lbl_ble_status = lv_label_create(p_info);
     lv_label_set_text(lbl_ble_status, "Initializing...");
-    lv_obj_set_style_text_font(lbl_ble_status, &font_styrene_48, 0);
+    lv_obj_set_style_text_font(lbl_ble_status, UI_FONT_BIG_STATUS, 0);
     lv_obj_set_style_text_color(lbl_ble_status, COL_DIM, 0);
     lv_obj_set_pos(lbl_ble_status, 56, 2);
 
     lbl_ble_device = lv_label_create(p_info);
     lv_label_set_text(lbl_ble_device, "Device: ---");
-    lv_obj_set_style_text_font(lbl_ble_device, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(lbl_ble_device, UI_FONT_INFO, 0);
     lv_obj_set_style_text_color(lbl_ble_device, COL_DIM, 0);
     lv_obj_set_pos(lbl_ble_device, 0, 64);
 
     lbl_ble_mac = lv_label_create(p_info);
     lv_label_set_text(lbl_ble_mac, "Address: ---");
-    lv_obj_set_style_text_font(lbl_ble_mac, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(lbl_ble_mac, UI_FONT_INFO, 0);
     lv_obj_set_style_text_color(lbl_ble_mac, COL_DIM, 0);
     lv_obj_set_pos(lbl_ble_mac, 0, 100);
 
@@ -362,19 +383,19 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
 
     lv_obj_t* reset_lbl = lv_label_create(reset_zone);
     lv_label_set_text(reset_lbl, "Reset Bluetooth");
-    lv_obj_set_style_text_font(reset_lbl, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(reset_lbl, UI_FONT_INFO, 0);
     lv_obj_set_style_text_color(reset_lbl, COL_DIM, 0);
 
     // Attribution
     lv_obj_t* lbl_credit = lv_label_create(ble_container);
     lv_label_set_text(lbl_credit, "Built by @hermannbjorgvin");
-    lv_obj_set_style_text_font(lbl_credit, &font_styrene_24, 0);
+    lv_obj_set_style_text_font(lbl_credit, UI_FONT_CREDIT, 0);
     lv_obj_set_style_text_color(lbl_credit, COL_DIM, 0);
     lv_obj_align(lbl_credit, LV_ALIGN_BOTTOM_MID, 0, -46);
 
     lv_obj_t* lbl_credit2 = lv_label_create(ble_container);
     lv_label_set_text(lbl_credit2, "Clawd animation by @amaanbuilds");
-    lv_obj_set_style_text_font(lbl_credit2, &font_styrene_20, 0);
+    lv_obj_set_style_text_font(lbl_credit2, UI_FONT_CREDIT_SM, 0);
     lv_obj_set_style_text_color(lbl_credit2, COL_DIM, 0);
     lv_obj_align(lbl_credit2, LV_ALIGN_BOTTOM_MID, 0, -20);
 
